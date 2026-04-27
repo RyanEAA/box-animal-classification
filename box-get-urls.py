@@ -19,6 +19,8 @@ CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
 ENV_PATH = find_dotenv(usecwd=True) or ".env"
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))
+OUTPUT_FILE = os.getenv("OUTPUT_FILE", "box_images.json")
 
 
 def store_tokens(access_token, refresh_token):
@@ -63,6 +65,11 @@ parser.add_argument(
     type=int,
     default=int(os.getenv("BATCH_SIZE", "100")),
     help="Number of new records to buffer before writing to box_images.json.",
+)
+parser.add_argument(
+    "--output-file",
+    default=os.getenv("OUTPUT_FILE", "box_images.json"),
+    help="Output JSON file for storing image URLs.",
 )
 args = parser.parse_args()
 

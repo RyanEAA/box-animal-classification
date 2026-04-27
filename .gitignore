@@ -1,2 +1,4 @@
 .env
-box_images.json
+*.json
+*.jsonl
+*.csv

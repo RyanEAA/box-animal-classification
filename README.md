@@ -5,18 +5,23 @@ End-to-end pipeline for classifying animals in Box images with spatial bounding 
 1. **OAuth Setup** – Authenticate with Box and store tokens (.env)
 2. **Crawl Box** – Recursively traverse folders and export image metadata
 3. **Run SpeciesNet** – Classify animals in each image, extract bounding boxes
-4. **Export to CSV** – Flatten results for analysis, ML training, or database import
+4. **Run OCR Metadata** – Extract trail-cam overlay metadata from image footer text
+5. **Export to CSV** – Flatten results for analysis, ML training, or database import
 
 ## Project Files
 
 - `box-oauth-setup.py` – One-time OAuth bootstrap (gets ACCESS_TOKEN + REFRESH_TOKEN)
 - `box-get-urls.py` – Crawls Box folders, exports image metadata + URLs with batch writes + de-duplication
 - `box-run-speciesnet.py` – Downloads images, runs SpeciesNet classification, extracts animal labels + bounding boxes
+- `paddle_metadata_ocr.py` – Downloads images, runs PaddleOCR on bottom crop, parses date/time/temperature metadata
+- `run-full-pipeline.py` – Runs all scripts in sequence (OAuth -> crawl -> SpeciesNet -> OCR)
 - `jsonl-to-csv.py` – Converts JSONL results to CSV (one row per animal per image)
 - `requirements.txt` – Python dependencies
 - `.env` – Local credentials and config (not committed)
 - `box_images.json` – Index of all crawled images (source data)
 - `speciesnet_results.jsonl` – Animal classifications with spatial data (JSONL format)
+- `metadata_results.jsonl` – Full OCR extraction logs (success + error entries)
+- `metadata.jsonl` – Batched metadata-only output (successful records only)
 - `speciesnet_results.csv` – Flattened results for analysis (CSV format)
 
 ## 1) Setup
@@ -55,6 +60,10 @@ SPECIESNET_MODEL=
 SPECIESNET_RUN_MODE=single_thread
 SPECIESNET_MIN_SCORE=0.1
 SPECIESNET_MAX_ANIMALS=5
+METADATA_RESULTS_FILE=metadata_results.jsonl
+METADATA_OUTPUT_FILE=metadata.jsonl
+METADATA_BATCH_SIZE=20
+OCR_CROP_PERCENT=0.065
 ```
 
 Notes:
@@ -64,6 +73,8 @@ Notes:
 - **Crawler options**: BATCH_SIZE controls buffer size before each write (default 100); QUIET_MODE=true suppresses logs.
 - **SpeciesNet options**: SPECIESNET_MODEL selects the model (leave empty for default); RUN_MODE can be single_thread/multi_thread/multi_process.
 - **Filtering**: SPECIESNET_MIN_SCORE filters low-confidence predictions (default 0.1); SPECIESNET_MAX_ANIMALS limits top-N animals per image (default 5).
+- **OCR metadata output**: METADATA_RESULTS_FILE stores full run logs; METADATA_OUTPUT_FILE stores successful metadata entries written in batches.
+- **OCR tuning**: METADATA_BATCH_SIZE controls batch flush size (default 20); OCR_CROP_PERCENT controls footer crop height for OCR (default 0.065).
 
 ## 4) Run OAuth Bootstrap (one-time)
 
@@ -218,6 +229,64 @@ Example: `[0.1, 0.2, 0.6, 0.7]` = animal located at x:10%-70%, y:20%-90% of imag
 
 ## 8) Export to CSV
 
+## 8) Run OCR Metadata Extraction
+
+Process each image in box_images.json through PaddleOCR and parse trail-cam metadata text:
+
+```bash
+# Default outputs:
+# - metadata_results.jsonl (full logs)
+# - metadata.jsonl (batched metadata-only output)
+.venv/bin/python paddle_metadata_ocr.py
+
+# Process only first 25 images
+.venv/bin/python paddle_metadata_ocr.py --limit 25
+
+# Reprocess all files
+.venv/bin/python paddle_metadata_ocr.py --reprocess
+
+# Adjust crop amount used before OCR
+.venv/bin/python paddle_metadata_ocr.py --crop-percent 0.08
+
+# Change metadata batch flush size (default 20)
+.venv/bin/python paddle_metadata_ocr.py --batch-size 20
+
+# Custom output files
+.venv/bin/python paddle_metadata_ocr.py --results-file metadata_results.jsonl --metadata-file metadata.jsonl
+```
+
+What this script does:
+
+1. Reads records from box_images.json
+2. Downloads each image temporarily from Box
+3. Crops the bottom footer region for OCR
+4. Runs PaddleOCR and logs recognized text in console
+5. Chooses parser based on path:
+   - Cam1..Cam5 paths use parse_metadata_12345
+   - All other paths use parse_metadata_678
+6. Writes full records to metadata_results.jsonl
+7. Writes metadata-only records to metadata.jsonl every 20 successful entries
+8. Deletes temporary image and crop files
+
+Metadata-only output format (metadata.jsonl):
+
+```json
+{
+  "file_id": "2123025883133",
+  "file_name": "IMG_0001.JPG",
+  "metadata": {
+    "temperature": "29C",
+    "pressure": "29.50 inHg",
+    "camera_id": "TRAILCAM1",
+    "date": "12/21/2025",
+    "time": "06:14 PM"
+  },
+  "parser": "parse_metadata_12345"
+}
+```
+
+## 9) Export to CSV
+
 Convert JSONL results to CSV (one row per animal per image) for analysis and ML training:
 
 ```bash
@@ -249,7 +318,32 @@ CSV is ideal for:
 - Database import
 - Sharing with team/collaborators
 
-## 9) Recommended Next Stage: Download -> Process -> Delete
+## 10) Run Full Pipeline In One Command
+
+Run the complete sequence with one script:
+
+```bash
+.venv/bin/python run-full-pipeline.py
+```
+
+This runs, in order:
+
+1. box-oauth-setup.py
+2. box-get-urls.py
+3. box-run-speciesnet.py
+4. paddle_metadata_ocr.py
+
+Useful options:
+
+```bash
+# Skip OAuth if tokens are already valid
+.venv/bin/python run-full-pipeline.py --skip-oauth
+
+# Use a specific Python interpreter
+.venv/bin/python run-full-pipeline.py --python .venv/bin/python
+```
+
+## 11) Recommended Next Stage: Download -> Process -> Delete
 
 For your full pipeline (AI model + OCR + deletion), process one file at a time using file_id as the source of truth.
 
@@ -269,7 +363,7 @@ Why file_id is your unique key:
 - More reliable than URL or path
 - Fits delete operations directly (Box SDK: `client.file(file_id).delete()`)
 
-## 10) Safety Recommendations Before Deleting
+## 12) Safety Recommendations Before Deleting
 
 - Start with dry-run mode (no delete)
 - Write a processing log with statuses: pending, processed, failed, deleted
@@ -277,7 +371,7 @@ Why file_id is your unique key:
 - Keep retry logic for transient API failures
 - Consider moving to an archive folder first instead of immediate delete
 
-## 11) Common Issues
+## 13) Common Issues
 
 **401 invalid_token:**
 
@@ -306,7 +400,13 @@ Why file_id is your unique key:
 - Detector may not have confidence in bounding box for that detection
 - This is expected for some images; use available box data for training
 
-## 12) Current Script Behavior Notes
+**OCR metadata fields are null or noisy:**
+
+- Increase crop with --crop-percent (for example 0.08)
+- Check parser selected from path (Cam1..Cam5 routes to parse_metadata_12345)
+- Use OCR text logs to tune regex parsing
+
+## 14) Current Script Behavior Notes
 
 **box-get-urls.py** supports two auth modes:
 
@@ -337,3 +437,18 @@ Additional features:
 - Expands nested bounding box arrays
 - Handles images with multiple animals (one CSV row per animal)
 - Includes error handling for malformed JSONL records
+
+**paddle_metadata_ocr.py** features:
+
+- Downloads Box images with ACCESS_TOKEN, processes them one-by-one, and cleans up temp files
+- Chooses OCR parser by camera path (Cam1..Cam5 -> parse_metadata_12345)
+- Logs extracted OCR text in console for each file
+- Writes full run logs to metadata_results.jsonl
+- Flushes successful metadata-only records to metadata.jsonl every 20 records (configurable)
+
+**run-full-pipeline.py** features:
+
+- Executes all pipeline scripts in sequence
+- Streams each script output live
+- Stops immediately on first failure and reports exit code
+- Supports skipping OAuth when tokens are already available

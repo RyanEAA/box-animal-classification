@@ -28,7 +28,7 @@ End-to-end pipeline for classifying animals in Box images with spatial bounding 
 
 Use your virtual environment and install dependencies:
 
-I used python version 9.25 for this project
+I used python version 9.25 for this project, because speciesnet only works for python 3.9
 
 - python -m venv .venv
 - source .venv/bin/activate

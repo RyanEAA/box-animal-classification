@@ -28,6 +28,8 @@ End-to-end pipeline for classifying animals in Box images with spatial bounding 
 
 Use your virtual environment and install dependencies:
 
+I used python version 9.25 for this project
+
 - python -m venv .venv
 - source .venv/bin/activate
 - python -m pip install -r requirements.txt

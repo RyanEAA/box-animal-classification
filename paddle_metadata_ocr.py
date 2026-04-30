@@ -7,14 +7,20 @@ from pathlib import Path
 from typing import Dict, List, Set
 
 import cv2
-import requests
-from dotenv import load_dotenv
+from boxsdk import Client, OAuth2
+from boxsdk.auth.developer_token_auth import DeveloperTokenAuth
+from boxsdk.exception import BoxAPIException, BoxOAuthException
+from dotenv import find_dotenv, load_dotenv, set_key
 from paddleocr import PaddleOCR
 
 
 load_dotenv()
 
+CLIENT_ID = os.getenv("CLIENT_ID")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
+REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
+ENV_PATH = find_dotenv(usecwd=True) or ".env"
 
 ocr = PaddleOCR(
     lang="en",
@@ -22,6 +28,30 @@ ocr = PaddleOCR(
     use_doc_unwarping=False,
     use_textline_orientation=False,
 )
+
+
+def store_tokens(access_token, refresh_token):
+    set_key(ENV_PATH, "ACCESS_TOKEN", access_token)
+    if refresh_token:
+        set_key(ENV_PATH, "REFRESH_TOKEN", refresh_token)
+
+
+def build_client() -> Client:
+    if not ACCESS_TOKEN:
+        raise ValueError("ACCESS_TOKEN is missing. Set it in your .env file.")
+
+    if REFRESH_TOKEN and CLIENT_ID and CLIENT_SECRET:
+        auth = OAuth2(
+            client_id=CLIENT_ID,
+            client_secret=CLIENT_SECRET,
+            access_token=ACCESS_TOKEN,
+            refresh_token=REFRESH_TOKEN,
+            store_tokens=store_tokens,
+        )
+    else:
+        auth = DeveloperTokenAuth(get_new_token_callback=lambda: ACCESS_TOKEN)
+
+    return Client(auth)
 
 
 def to_bool(value):
@@ -158,11 +188,12 @@ def parse_metadata_12345(texts: List[str]) -> Dict:
     if data["temperature"] is None:
         data["temperature"] = texts[0].strip() if texts else None
 
-    if data["date"] is None:
+    if data["date"] is None :
         data["date"] = texts[-2].strip() if len(texts) >= 2 else None
+        # make sure date is in 12/21/2025 format
 
     if data["time"] is None:
-        data["time"] = texts[-2].strip() if len(texts) >= 2 else None
+        data["time"] = texts[-1].strip() if texts else None
 
     return data
 
@@ -212,35 +243,21 @@ def choose_parser(path_value: str):
     return "parse_metadata_678", parse_metadata_678
 
 
-def download_image_from_record(record: Dict) -> str:
-    if not ACCESS_TOKEN:
-        raise ValueError("ACCESS_TOKEN is missing. Set it in your .env file.")
-
+def download_image_from_record(client: Client, record: Dict) -> str:
     file_name = record.get("file_name") or "image.jpg"
     suffix = Path(file_name).suffix or ".jpg"
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     temp_path = temp_file.name
-    temp_file.close()
 
-    download_url = record.get("direct_download_url")
     file_id = str(record.get("file_id", "")).strip()
-    if not download_url and file_id:
-        download_url = f"https://api.box.com/2.0/files/{file_id}/content"
-
-    if not download_url:
+    if not file_id:
         if os.path.exists(temp_path):
             os.remove(temp_path)
-        raise ValueError("No direct_download_url or file_id found in record.")
-
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
-    response = requests.get(download_url, headers=headers, stream=True, timeout=60)
-    response.raise_for_status()
+        raise ValueError("No file_id found in record.")
 
     try:
-        with open(temp_path, "wb") as out:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    out.write(chunk)
+        with temp_file:
+            client.file(file_id).download_to(temp_file)
     except Exception:
         if os.path.exists(temp_path):
             os.remove(temp_path)
@@ -303,6 +320,8 @@ def main():
     records = load_json_list(args.input_file)
     processed_ids = set() if args.reprocess else load_processed_file_ids(args.results_file)
 
+    client = build_client()
+
     total = len(records)
     processed = 0
     skipped = 0
@@ -341,7 +360,7 @@ def main():
         tmp_img_path = None
         try:
             log(f"Processing metadata file_id={file_id} name={file_name}", quiet_mode)
-            tmp_img_path = download_image_from_record(record)
+            tmp_img_path = download_image_from_record(client, record)
             texts = run_paddle_ocr(tmp_img_path, args.crop_percent)
             log(f"  OCR texts: {texts}", quiet_mode)
             parser_name, parser_func = choose_parser(path_value)
@@ -379,6 +398,22 @@ def main():
                 f"temp={metadata.get('temperature')} date={metadata.get('date')} time={metadata.get('time')}",
                 quiet_mode,
             )
+
+        except (BoxOAuthException, BoxAPIException) as e:
+            failed += 1
+            append_result(
+                args.results_file,
+                {
+                    "status": "error",
+                    "file_id": file_id,
+                    "file_name": file_name,
+                    "file_url": file_url,
+                    "path": path_value,
+                    "error": type(e).__name__,
+                    "message": str(e),
+                },
+            )
+            log(f"  failed file_id={file_id} error={type(e).__name__}", quiet_mode)
 
         except Exception as e:
             failed += 1

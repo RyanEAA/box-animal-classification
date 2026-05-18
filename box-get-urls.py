@@ -168,8 +168,6 @@ def get_all_images(
                     "path": parent_path,
                     "file_url": file_url,
 
-                    # These URLs are regular Box URLs and require auth.
-                    "web_url": file_url,
                     "direct_download_url": f"https://api.box.com/2.0/files/{file.id}/content",
                     "preview_url": f"https://app.box.com/file/{file.id}/preview"
                 })
